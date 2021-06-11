@@ -1,119 +1,355 @@
+use std::ops::Range;
 use std::rc::Rc;
 
+use super::error::Error::{self, *};
 use super::op_code::disassemble_instruction;
-use super::{op_code::OpCode, value::Value};
+use super::{
+    op_code::OpCode::{self, *},
+    value::Value,
+};
+use crate::expect_value;
+use crate::trace;
 use crate::util::variant_eq;
 use fxhash::FxHashMap;
+use smol_str::SmolStr;
+#[derive(Debug)]
+struct Compiler {
+    locals: Vec<Local>,
+    scope_depth: i32,
+    
+}
+
+impl Compiler {
+    fn new() -> Self {
+        Self {
+            scope_depth: 0,
+            locals: Vec::with_capacity(256),
+        }
+    }
+
+    pub fn local_count(&self) -> usize {
+        self.locals.len()
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+    }
+}
+
+#[derive(Debug)]
+struct Local {
+    pub(crate) name: SmolStr,
+    pub(crate) depth: i32,
+}
+#[derive(Debug)]
 pub struct Vm {
-    operations: Vec<OpCode>,
-    line_number: Vec<usize>,
+    instructions: Vec<OpCode>,
+    line_number: Vec<Range<usize>>,
     stack: Vec<Value>,
-    globals: FxHashMap<String, Rc<Value>>,
+    globals: FxHashMap<SmolStr, Value>,
+    compiler: Compiler,
+    ip: usize,
 }
 
 impl Vm {
     pub fn new() -> Self {
         Self {
-            operations: vec![],
+            instructions: vec![],
             line_number: vec![],
-            stack: vec![],
-            globals: FxHashMap::default()
+            stack: Vec::with_capacity(256),
+            globals: FxHashMap::default(),
+            compiler: Compiler::new(),
+            ip: 0,
         }
     }
+    pub fn operations(&self) -> &Vec<OpCode> {
+        &self.instructions
+    }
 
-    pub fn exec(&mut self) {
-        use Value::*;
-        for (i, op) in self.operations.iter().enumerate() {
+    pub fn exec(&mut self) -> anyhow::Result<()> {
+        while self.ip < self.instructions.len() {
+            let op = &self.instructions[self.ip];
             match op {
-                OpCode::ConstantI32(i) => {
-                    self.stack.push(I32(*i));
+                ConstantI32(i) => {
+                    self.stack.push(Value::I32(*i));
                 }
-                OpCode::Return => {
+                Return => {
                     self.stack.pop();
                 }
-                OpCode::SubtractI32 => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                SubtractI32 => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     self.stack.push(a - b);
                 }
-                OpCode::MultiplyI32 => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                MultiplyI32 => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     self.stack.push(a * b);
                 }
-                OpCode::AddI32 => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                AddI32 => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     self.stack.push(a + b);
                 }
 
-                OpCode::DivideI32 => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                DivideI32 => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     self.stack.push(a / b);
                 }
-                OpCode::ConstantBoolean(b) => {
-                    self.stack.push(Boolean(*b));
+                ConstantBoolean(b) => {
+                    self.stack.push(Value::Boolean(*b));
                 }
-                OpCode::Equal => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                Equal => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     assert!(variant_eq(&a, &b));
-                    let res = Boolean(a == b);
+                    let res = Value::Boolean(a == b);
                     self.stack.push(res);
                 }
-                OpCode::NotEqual => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
+                NotEqual => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
                     assert!(variant_eq(&a, &b));
-                    let res = Boolean(a != b);
+                    let res = Value::Boolean(a != b);
                     self.stack.push(res);
                 }
-                OpCode::Greater => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
-                    assert!(variant_eq(&a, &b));
-                    let res = Boolean(a == b);
-                    self.stack.push(res);
+                Greater => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    assert!(matches!(a, Value::I32(..)));
+                    assert!(matches!(b, Value::I32(..)));
+                    self.stack.push(Value::Boolean(a > b));
                 }
-                OpCode::Less => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
-                    assert!(variant_eq(&a, &b));
-                    let res = Boolean(a == b);
-                    self.stack.push(res);
+                Less => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    assert!(matches!(a, Value::I32(..)));
+                    assert!(matches!(b, Value::I32(..)));
+                    self.stack.push(Value::Boolean(a < b));
                 }
-                OpCode::GreaterEqual => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
-                    assert!(variant_eq(&a, &b));
-                    let res = Boolean(a == b);
-                    self.stack.push(res);
+                GreaterEqual => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    assert!(matches!(a, Value::I32(..)));
+                    assert!(matches!(b, Value::I32(..)));
+                    self.stack.push(Value::Boolean(a >= b));
                 }
-                OpCode::LessEqual => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
-                    assert!(variant_eq(&a, &b));
-                    let res = Boolean(a == b);
-                    self.stack.push(res);
+                LessEqual => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    assert!(matches!(a, Value::I32(..)));
+                    assert!(matches!(b, Value::I32(..)));
+                    self.stack.push(Value::Boolean(a <= b));
                 }
+
+                And => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    if let (Value::Boolean(left), Value::Boolean(right)) = (a, b) {
+                        self.stack.push(Value::Boolean(left && right));
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at range: {:?}, expected boolean value",
+                            self.line_number[self.ip]
+                        ))
+                        .into());
+                    }
+                }
+                Or => {
+                    let b = expect_value!(self);
+                    let a = expect_value!(self);
+                    if let (Value::Boolean(left), Value::Boolean(right)) = (a, b) {
+                        self.stack.push(Value::Boolean(left || right));
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at range: {:?}, expected boolean value",
+                            self.line_number[self.ip]
+                        ))
+                        .into());
+                    }
+                }
+                Neg => {
+                    let a = expect_value!(self);
+                    if let Value::I32(v) = a {
+                        self.stack.push(Value::I32(-v));
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at range: {:?}, expected integer value, operation negative",
+                            self.line_number[self.ip]
+                        ))
+                        .into());
+                    }
+                }
+                Pos => {
+                    let a = expect_value!(self);
+                    if let Value::I32(v) = a {
+                        self.stack.push(Value::I32(v));
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at range: {:?}, expected integer value, operation positive",
+                            self.line_number[self.ip]
+                        ))
+                        .into());
+                    }
+                }
+                Pop => {
+                    self.stack.pop();
+                }
+                DefineGlobal(name) => {
+                    let value = expect_value!(self);
+                    self.globals.insert(name.clone(), value);
+                }
+                Nil => todo!(),
+                GetGlobal(name) => {
+                    if let Some(value) = self.globals.get(name) {
+                        self.stack.push(value.clone());
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at range: {:?}, variable {} not defined",
+                            self.line_number[self.ip], name
+                        ))
+                        .into());
+                    }
+                }
+                GetLocal(index) => {
+                    self.stack.push(self.stack[*index].clone());
+                }
+                SetLocal(index) => {
+                    self.stack[*index] = self.stack.last().unwrap().clone();
+                }
+                JumpIfFalse(offset) => {
+                    if let Some(Value::Boolean(v)) = self.stack.last() {
+                        if !*v {
+                            trace!(self, op);
+                            println!("ip: {}, offset: {}", self.ip, offset);
+                            self.ip += offset;
+                            continue;
+                        }
+                    } else {
+                        return Err(RuntimeError(format!(
+                            "error at {:?}, peek of stack should be a boolean",
+                            self.line_number[self.ip]
+                        ))
+                        .into());
+                    }
+                }
+                Jump(offset) => {
+                    trace!(self, op);
+                    println!("ip: {}, offset: {}", self.ip, offset);
+                    self.ip += offset;
+                    continue;
+                }
+                Loop(offset) => {
+                    self.ip -= offset;
+                },
             }
-            // DEBUG: start
-            if cfg!(debug_assertions) {
-                disassemble_instruction(&op, self.line_number[i]);
-                println!("stack: {:?}", self.stack);
-            }
-            // DEBUG: end
+            trace!(self, op);
+            self.ip += 1;
         }
+        Ok(())
     }
 
-    pub fn add_operation(&mut self, op: OpCode, line_number: usize) {
-        self.operations.push(op);
+    pub fn add_instruction(&mut self, op: OpCode, line_number: Range<usize>) {
+        self.instructions.push(op);
         self.line_number.push(line_number);
     }
 
     pub fn stack(&self) -> &Vec<Value> {
         &self.stack
     }
-}
 
+    pub fn define_variable(&mut self, name: SmolStr, range: Range<usize>) -> anyhow::Result<()> {
+        if self.compiler.scope_depth > 0 {
+            self.check_if_variable_defined_in_same_scope(&name)?;
+            let depth = self.compiler.scope_depth;
+            let local = Local { depth, name };
+            self.compiler.locals.push(local);
+            // println!("local: {:?}", self.compiler.locals);
+        } else {
+            self.add_instruction(DefineGlobal(name), range);
+        }
+        Ok(())
+    }
+    pub fn begin_scope(&mut self) {
+        self.compiler.begin_scope();
+    }
+
+    pub fn end_scope(&mut self) {
+        self.compiler.end_scope();
+        let depth = self.compiler.scope_depth;
+        while let Some(local) = self.compiler.locals.last() {
+            if local.depth <= depth {
+                break;
+            }
+            self.add_instruction(Pop, 0..0);
+            self.compiler.locals.pop();
+        }
+    }
+
+    fn check_if_variable_defined_in_same_scope(&mut self, name: &SmolStr) -> anyhow::Result<()> {
+        let depth = self.compiler.scope_depth;
+        for local in self.compiler.locals.iter().rev() {
+            if local.depth < depth {
+                break;
+            }
+            if &local.name == name {
+                return Err(
+                    RuntimeError(format!("{} has already defined in this scope", name)).into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_local(&self, name: &SmolStr) -> Option<usize> {
+        self.compiler
+            .locals
+            .iter()
+            .position(|item| &item.name == name)
+    }
+
+    pub fn scope_depth(&self) -> i32 {
+        self.compiler.scope_depth
+    }
+
+    pub(crate) fn emit_jump(&mut self, op: OpCode, range: Range<usize>) -> usize {
+        self.add_instruction(op, range);
+        self.instructions.len() - 1
+    }
+
+    pub(crate) fn patch_jump(&mut self, index: usize) -> anyhow::Result<()> {
+        let new_offset = self.instructions.len() - index;
+        if let JumpIfFalse(ref mut offset) = self.instructions[index] {
+            *offset = new_offset;
+        } else {
+            return Err(RuntimeError(format!(
+                "operation should be JumpIfFalse at index {}",
+                index
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn patch_else_jump(&mut self, index: usize) -> anyhow::Result<()> {
+        let new_offset = self.instructions.len() - index - 1;
+        if let Jump(ref mut offset) = self.instructions[index] {
+            *offset = new_offset;
+        } else {
+            return Err(
+                RuntimeError(format!("operation should be Jump at index {}", index)).into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn emit_loop(&mut self, loop_start: usize, range: Range<usize>) {
+        let offset = self.instructions.len() - loop_start;
+        self.add_instruction(Loop(offset), range);
+    }
+}
